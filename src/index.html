@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="欠課管理">
+<meta name="theme-color" content="#2563eb">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>欠課管理</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#1d2330;--card:#fff;--mut:#6b7280;--line:#e2e5ea;--pri:#2563eb;--req:#d97706;--bad:#dc2626;--ok:#16a34a}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--fg:#e8eaf0;--card:#1c212b;--mut:#9aa3b2;--line:#2b3240;--pri:#60a5fa;--req:#fbbf24;--bad:#f87171;--ok:#4ade80}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,"Hiragino Sans","Yu Gothic",sans-serif;background:var(--bg);color:var(--fg)}
+#app{max-width:640px;margin:0 auto;padding:12px 12px 80px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{flex:1;border:0;background:none;padding:12px 0;color:var(--mut);font-size:13px}nav button.on{color:var(--pri);font-weight:700}
+button,input,select{font:inherit;color:inherit}button{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:8px 12px}
+button.pri{background:var(--pri);color:#fff;border-color:var(--pri)}button.danger{color:var(--bad)}button:disabled{opacity:.4}.wide{width:100%;margin-top:12px;padding:12px}
+input,select{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:8px;width:100%}input[type=checkbox]{width:auto}
+.bar{display:flex;gap:6px;margin-bottom:8px}.bar input,.bar select{flex:1}.mut,small{color:var(--mut)}
+.cell{display:flex;align-items:center;gap:10px;background:var(--card);border:2px solid var(--line);border-radius:10px;padding:12px;margin:6px 0}
+.cell b{width:1.5rem;text-align:center}.cell span{flex:1}.cell i{color:var(--mut);font-size:12px}.cell em{color:var(--bad);font-weight:700;font-style:normal}
+.cell.req{border-left:6px solid var(--req)}.cell.abs{background:color-mix(in srgb,var(--bad) 14%,var(--card))}.cell.sel{border-color:var(--pri)}.cell.dis{opacity:.5}.cell.none{border-style:dashed}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0}.card.req{border-left:6px solid var(--req)}.card.over{border-color:var(--bad)}
+.h{display:flex;align-items:center;gap:8px}.h .n{margin-left:auto;font-weight:700}.tag{background:var(--req);color:#fff;border-radius:6px;padding:0 6px;font-size:12px}
+.pb{height:10px;background:var(--line);border-radius:5px;margin:8px 0 4px;overflow:hidden}.pb i{display:block;height:100%;background:var(--ok)}.over .pb i{background:var(--bad)}
+.sum{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.grid{display:grid;gap:4px;text-align:center}.gc{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 2px;font-size:12px;min-height:44px;word-break:break-all}.gc.req{border-color:var(--req)}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}dialog{border:0;border-radius:12px;width:min(92vw,420px);background:var(--card);color:var(--fg)}dialog label{display:block;margin-top:8px;font-size:13px;color:var(--mut)}
+#login{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:9}#login[hidden]{display:none}
+</style>
+</head>
+<body>
+<div id="login" hidden><h2>欠課管理</h2><p class="mut">Googleアカウントでログインしてください</p><div id="gbtn"></div></div>
+<div id="app"><main id="main">読み込み中…</main></div>
+<nav id="nav"></nav>
+<dialog id="dlg"></dialog>
+<script>
+// ===== 設定: 公開用の値のみ記載（許可メールはGAS側のスクリプトプロパティに保持）=====
+const CFG = { GAS_URL: '', CLIENT_ID: '190726521563-v6737lsh6n5jr8398bkbojumd5ikjb7e.apps.googleusercontent.com' }; // 空の場合はこの端末のlocalStorageだけで動くローカルモード
+// =====================================================================================
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const iso = d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+const EMPTY = () => ({ subjects: [], timetables: [], slots: [], absences: [], irregular: [], settings: [] });
+let db = EMPTY(), tab = 'in', curDate = iso(new Date()), sel = new Set(), curTT = '', idt = null;
+
+// ---- 認証 ----
+function tokenOK() { try { const c = JSON.parse(localStorage.idt || 'null'); if (c && c.exp * 1000 > Date.now() + 6e4) { idt = c.t; return true; } } catch {} return false; }
+function onCred(r) {
+  const p = JSON.parse(atob(r.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+  localStorage.idt = JSON.stringify({ t: r.credential, exp: p.exp }); idt = r.credential; $('#login').hidden = true; start();
+}
+function needLogin() {
+  $('#login').hidden = false;
+  google.accounts.id.initialize({ client_id: CFG.CLIENT_ID, callback: onCred, auto_select: true });
+  google.accounts.id.renderButton($('#gbtn'), { theme: 'outline', size: 'large' });
+  google.accounts.id.prompt(); // 2回目以降はGoogleの自動選択で無操作ログイン
+}
+function boot() { if (!CFG.CLIENT_ID || tokenOK()) start(); else needLogin(); }
+
+// ---- データ層 ----
+async function api(action, extra = {}) {
+  if (!tokenOK()) { needLogin(); throw new Error('ログインが必要です'); }
+  const r = await fetch(CFG.GAS_URL, { method: 'POST', body: JSON.stringify({ action, token: idt, ...extra }) });
+  const j = await r.json();
+  if (!j.ok) { if (j.error === 'auth') { localStorage.removeItem('idt'); needLogin(); } throw new Error(j.error === 'forbidden' ? 'このアカウントは許可されていません' : j.error); }
+  return j;
+}
+function norm(d) {
+  d.subjects.forEach(s => { ['credits', 'limit', 'limitCert', 'initial'].forEach(k => s[k] = Number(s[k]) || 0); s.required = s.required === true || s.required === 'true'; });
+  ['slots', 'irregular', 'absences'].forEach(n => d[n].forEach(r => { if ('period' in r) r.period = Number(r.period); if ('dow' in r) r.dow = Number(r.dow); }));
+  return d;
+}
+async function load() { db = norm(CFG.GAS_URL ? (await api('load')).data : Object.assign(EMPTY(), JSON.parse(localStorage.db || '{}'))); }
+async function commit(...sheets) {
+  try { if (CFG.GAS_URL) for (const s of sheets) await api('save', { sheet: s, rows: db[s] }); else localStorage.db = JSON.stringify(db); }
+  catch (e) { alert('保存に失敗しました: ' + e.message); }
+  render();
+}
+async function start() { try { await load(); } catch (e) { $('#main').textContent = '読み込み失敗: ' + e.message; return; } render(); }
+
+// ---- 共通 ----
+const setv = k => (db.settings.find(s => s.key === k) || {}).value;
+const P = () => Number(setv('periods')) || 6;
+const sname = id => (db.subjects.find(s => s.id === id) || {}).name || '';
+const cnt = s => s.initial + db.absences.filter(a => a.subjectId === s.id).length;
+const subjOpts = () => [['', '（なし）'], ...db.subjects.map(s => [s.id, s.name])];
+function form(title, fields, ok, del) {
+  const d = $('#dlg');
+  d.innerHTML = `<form method="dialog"><h3>${esc(title)}</h3>${fields.map(f => `<label>${esc(f.l)}${
+    f.t === 'select' ? `<select name="${f.k}">${f.o.map(o => `<option value="${esc(o[0])}"${o[0] == f.v ? ' selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`
+    : f.t === 'check' ? ` <input type="checkbox" name="${f.k}"${f.v ? ' checked' : ''}>`
+    : `<input name="${f.k}" type="${f.t || 'text'}" value="${esc(f.v)}"${f.r ? ' required' : ''}>`}</label>`).join('')}
+    <div class="row"><button value="cancel" formnovalidate>キャンセル</button>${del ? '<button type="button" class="danger" id="fdel">削除</button>' : ''}<button value="ok" class="pri">保存</button></div></form>`;
+  d.showModal();
+  const fm = d.querySelector('form');
+  fm.onsubmit = e => {
+    if (e.submitter.value !== 'ok') return;
+    const o = {}; fields.forEach(f => { const el = fm.elements[f.k]; o[f.k] = f.t === 'check' ? el.checked : f.t === 'number' ? Number(el.value) : el.value; });
+    if (ok(o) === false) e.preventDefault();
+  };
+  if (del) $('#fdel').onclick = () => { d.close(); del(); };
+}
+
+// ---- 当日の時間割 ----
+function dayInfo(d) {
+  const tt = db.timetables.find(t => t.start <= d && d <= t.end), dow = new Date(d + 'T00:00').getDay();
+  return { tt, cells: [...Array(P())].map((_, i) => {
+    const p = i + 1, irr = db.irregular.find(x => x.date === d && x.period === p);
+    const sl = tt && db.slots.find(s => s.ttId === tt.id && s.dow === dow && s.period === p);
+    let sid = sl ? sl.subjectId : '';
+    if (irr && irr.type === 'change') sid = irr.subjectId || ''; else if (irr) sid = '';
+    return { p, irr, sid, ab: db.absences.find(a => a.date === d && a.period === p), none: irr && irr.type === 'none', empty: !sid && !irr };
+  }) };
+}
+const mv = n => { const d = new Date(curDate + 'T00:00'); d.setDate(d.getDate() + n); curDate = iso(d); sel.clear(); render(); };
+const tg = p => { const c = dayInfo(curDate).cells[p - 1]; if (c.none || c.empty) return; sel.has(p) ? sel.delete(p) : sel.add(p); render(); };
+function applySel() {
+  const { tt, cells } = dayInfo(curDate);
+  sel.forEach(p => {
+    const c = cells[p - 1];
+    if (c.ab) db.absences = db.absences.filter(a => a !== c.ab);
+    else db.absences.push({ id: uid(), ttId: tt ? tt.id : '', date: curDate, period: p, subjectId: c.sid });
+  });
+  sel.clear(); commit('absences');
+}
+
+// ---- 画面 ----
+const V = {};
+V.in = () => {
+  const { tt, cells } = dayInfo(curDate);
+  return `<div class="bar"><button onclick="mv(-1)">◀</button><input type="date" value="${curDate}" onchange="curDate=this.value;sel.clear();render()"><button onclick="mv(1)">▶</button></div>
+  <p class="mut">${tt ? esc(tt.name) : 'この日に該当する時間割がありません'}</p>
+  ${cells.map(c => {
+    const s = db.subjects.find(x => x.id === c.sid);
+    const cl = ['cell', c.none && 'none', c.ab && 'abs', sel.has(c.p) && 'sel', s && s.required && 'req', (c.none || c.empty) && 'dis'].filter(Boolean).join(' ');
+    const label = c.none ? 'コマなし' : esc(s ? s.name : (c.irr ? c.irr.reason : '—'));
+    const note = c.irr && !c.none ? ` <i>(${c.irr.type === 'change' ? '時間割変更' : '行事・加算なし'}${c.irr.reason && s ? ': ' + esc(c.irr.reason) : ''})</i>` : '';
+    return `<div class="${cl}" onclick="tg(${c.p})"><b>${c.p}</b><span>${label}${note}</span><em>${c.ab ? '欠課' : ''}</em></div>`;
+  }).join('')}
+  <button class="pri wide" onclick="applySel()" ${sel.size ? '' : 'disabled'}>選択したコマの欠課を切り替え (${sel.size})</button>`;
+};
+V.q = () => {
+  const rows = db.subjects.map(s => ({ s, c: cnt(s) })).sort((a, b) => b.s.required - a.s.required || a.s.name.localeCompare(b.s.name, 'ja'));
+  const over = rows.filter(r => !r.s.required && r.s.limit && r.c > r.s.limit).length;
+  return `<p class="sum">必須以外で上限超過の科目数: <b>${over}</b></p>` + (rows.map(({ s, c }) => {
+    const lim = s.limit, o = lim && c > lim, pct = lim ? Math.min(100, c / lim * 100) : 0;
+    return `<div class="card ${s.required ? 'req' : ''} ${o ? 'over' : ''}"><div class="h"><b>${esc(s.name)}</b>${s.required ? '<span class="tag">必須</span>' : ''}<small>${esc(s.category)}</small><span class="n">${c} / ${lim}</span></div>
+    <div class="pb"><i style="width:${pct}%"></i></div><small>${o ? `⚠ ${c - lim}コマ超過` : `あと${lim - c}コマ`}${s.limitCert ? `（診断書有: 上限${s.limitCert}・あと${s.limitCert - c}）` : ''}</small></div>`;
+  }).join('') || '<p class="mut">「科目」タブから科目を登録してください</p>');
+};
+V.tt = () => {
+  const t = db.timetables.find(x => x.id === curTT) || db.timetables[0]; if (t) curTT = t.id;
+  const days = [1, 2, 3, 4, 5], dn = '日月火水木金土'; let g = '';
+  if (t) {
+    g = `<div class="grid" style="grid-template-columns:2rem repeat(5,1fr)"><span></span>${days.map(d => `<b>${dn[d]}</b>`).join('')}`;
+    for (let p = 1; p <= P(); p++) g += `<b>${p}</b>` + days.map(d => {
+      const sl = db.slots.find(s => s.ttId === t.id && s.dow === d && s.period === p), s = sl && db.subjects.find(x => x.id === sl.subjectId);
+      return `<div class="gc ${s && s.required ? 'req' : ''}" onclick="editSlot(${d},${p})">${esc(s ? s.name : '＋')}</div>`;
+    }).join('');
+    g += '</div>';
+  }
+  return `<div class="bar"><select onchange="curTT=this.value;render()">${db.timetables.map(x => `<option value="${x.id}"${t && x.id === t.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select><button onclick="editTT()">新規</button>${t ? '<button onclick="editTT(curTT)">編集</button>' : ''}<button onclick="setPeriods()">コマ数</button></div>${t ? `<p class="mut">${t.start} 〜 ${t.end}</p>` : '<p class="mut">時間割を新規登録してください</p>'}${g}`;
+};
+V.ir = () => `<button class="pri wide" style="margin:0 0 8px" onclick="editIR()">変則時間割を追加</button>` +
+  ([...db.irregular].sort((a, b) => b.date.localeCompare(a.date) || a.period - b.period).map(r =>
+    `<div class="card" onclick="editIR('${r.id}')"><b>${r.date} ${r.period}限</b> <span class="tag">${{ change: '変更', event: '行事', none: 'コマなし' }[r.type]}</span><br><small>${esc(r.reason)}${r.subjectId ? ' → ' + esc(sname(r.subjectId)) : ''}</small></div>`).join('') || '<p class="mut">登録なし</p>');
+V.sb = () => `<button class="pri wide" style="margin:0 0 8px" onclick="editSB()">科目を追加</button>` +
+  (db.subjects.map(s => `<div class="card ${s.required ? 'req' : ''}" onclick="editSB('${s.id}')"><b>${esc(s.name)}</b> ${s.required ? '<span class="tag">必須</span>' : ''}<br><small>${esc(s.category)}｜${s.credits}単位｜上限${s.limit}（診断書有${s.limitCert}）｜初期欠課${s.initial}</small></div>`).join('') || '<p class="mut">登録なし</p>');
+
+// ---- 編集ダイアログ ----
+function editTT(id) {
+  const t = db.timetables.find(x => x.id === id) || { name: '', start: '', end: '' };
+  form(id ? '時間割を編集' : '時間割を登録', [{ k: 'name', l: '時間割名', v: t.name, r: 1 }, { k: 'start', l: '開始日', t: 'date', v: t.start, r: 1 }, { k: 'end', l: '終了日', t: 'date', v: t.end, r: 1 }],
+    o => { if (o.start > o.end) { alert('終了日は開始日以降にしてください'); return false; }
+      if (id) Object.assign(t, o); else { t.id = uid(); Object.assign(t, o); db.timetables.push(t); curTT = t.id; } commit('timetables'); },
+    id && (async () => {
+      if (db.absences.some(a => a.ttId === id)) return alert('欠課情報が作成されているため削除できません');
+      if (!confirm('この時間割と明細を削除しますか？')) return;
+      db.timetables = db.timetables.filter(x => x.id !== id); db.slots = db.slots.filter(s => s.ttId !== id); curTT = ''; commit('slots', 'timetables'); }));
+}
+function editSlot(d, p) {
+  const ex = db.slots.find(s => s.ttId === curTT && s.dow === d && s.period === p);
+  form(`${'日月火水木金土'[d]}曜 ${p}限`, [{ k: 'sid', l: '科目', t: 'select', o: subjOpts(), v: ex ? ex.subjectId : '' }],
+    o => { db.slots = db.slots.filter(s => s !== ex); if (o.sid) db.slots.push({ id: uid(), ttId: curTT, dow: d, period: p, subjectId: o.sid }); commit('slots'); },
+    ex && (() => { db.slots = db.slots.filter(s => s !== ex); commit('slots'); }));
+}
+function setPeriods() {
+  form('1日のコマ数', [{ k: 'n', l: 'コマ数（1〜8）', t: 'number', v: P(), r: 1 }], o => {
+    const n = Math.min(8, Math.max(1, Math.round(o.n))), s = db.settings.find(x => x.key === 'periods');
+    s ? s.value = n : db.settings.push({ key: 'periods', value: n }); commit('settings'); });
+}
+function editIR(id) {
+  const r = db.irregular.find(x => x.id === id) || { date: curDate, period: 1, type: 'change', reason: '', subjectId: '' };
+  form(id ? '変則時間割を編集' : '変則時間割を登録', [
+    { k: 'date', l: '年月日', t: 'date', v: r.date, r: 1 },
+    { k: 'period', l: 'コマ', t: 'select', o: [...Array(P())].map((_, i) => [i + 1, `${i + 1}限`]), v: r.period },
+    { k: 'type', l: '種別', t: 'select', o: [['change', '時間割変更'], ['event', '行事・テスト等（欠課は加算しない）'], ['none', 'コマなし（午前授業など）']], v: r.type },
+    { k: 'reason', l: '理由', v: r.reason }, { k: 'subjectId', l: '変更後の科目（時間割変更のみ）', t: 'select', o: subjOpts(), v: r.subjectId }],
+    o => { o.period = Number(o.period); if (o.type !== 'change') o.subjectId = '';
+      if (id) Object.assign(r, o); else { r.id = uid(); Object.assign(r, o); db.irregular.push(r); } commit('irregular'); },
+    id && (() => { db.irregular = db.irregular.filter(x => x !== r); commit('irregular'); }));
+}
+function editSB(id) {
+  const s = db.subjects.find(x => x.id === id) || { category: '', name: '', credits: 1, limit: 0, limitCert: 0, required: false, initial: 0 };
+  form(id ? '科目を編集' : '科目を登録', [
+    { k: 'category', l: '教科', v: s.category }, { k: 'name', l: '科目', v: s.name, r: 1 }, { k: 'credits', l: '単位', t: 'number', v: s.credits },
+    { k: 'limit', l: '欠課上限', t: 'number', v: s.limit }, { k: 'limitCert', l: '欠課上限（診断書有）', t: 'number', v: s.limitCert },
+    { k: 'required', l: '必須科目', t: 'check', v: s.required }, { k: 'initial', l: '初期欠課数（期の途中から使う場合）', t: 'number', v: s.initial }],
+    o => { if (id) Object.assign(s, o); else { s.id = uid(); Object.assign(s, o); db.subjects.push(s); } commit('subjects'); },
+    id && (() => {
+      if (db.slots.some(x => x.subjectId === id) || db.absences.some(x => x.subjectId === id)) return alert('時間割または欠課情報で使用中のため削除できません');
+      db.subjects = db.subjects.filter(x => x !== s); commit('subjects'); }));
+}
+
+function render() {
+  $('#nav').innerHTML = [['in', '欠課登録'], ['q', '照会'], ['tt', '時間割'], ['ir', '変則'], ['sb', '科目']].map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" onclick="tab='${k}';render()">${l}</button>`).join('');
+  $('#main').innerHTML = V[tab]();
+}
+if (!CFG.CLIENT_ID) boot();
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="if(CFG.CLIENT_ID)boot()"></script>
+</body>
+</html>
